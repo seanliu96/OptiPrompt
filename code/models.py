@@ -14,6 +14,8 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
+CACHE_DIR = r"C:\Users\Sean\Workspace\Data\pretrained_lm"
+
 class Prober():
 
     def __init__(self, args, random_init='none'):
@@ -42,24 +44,24 @@ class Prober():
         config = AutoConfig.from_pretrained(model_name)
         if isinstance(config, AlbertConfig):
             self.model_type = 'albert'
-            self.tokenizer = AlbertTokenizer.from_pretrained(vocab_name)
-            self.mlm_model = AlbertForMaskedLM.from_pretrained(model_name)
+            self.tokenizer = AlbertTokenizer.from_pretrained(vocab_name, cache_dir=os.path.join(CACHE_DIR, "albert"))
+            self.mlm_model = AlbertForMaskedLM.from_pretrained(model_name, cache_dir=os.path.join(CACHE_DIR, "albert"))
             if random_init == 'all':
                 logger.info('Random initialize model...')
                 self.mlm_model = AlbertForMaskedLM(self.mlm_model.config)
             self.base_model = self.mlm_model.albert
         elif isinstance(config, RobertaConfig):
             self.model_type = 'roberta'
-            self.tokenizer = RobertaTokenizer.from_pretrained(vocab_name)
-            self.mlm_model = RobertaForMaskedLM.from_pretrained(model_name)
+            self.tokenizer = RobertaTokenizer.from_pretrained(vocab_name, cache_dir=os.path.join(CACHE_DIR, "roberta"))
+            self.mlm_model = RobertaForMaskedLM.from_pretrained(model_name, cache_dir=os.path.join(CACHE_DIR, "roberta"))
             if random_init == 'all':
                 logger.info('Random initialize model...')
                 self.mlm_model = RobertaForMaskedLM(self.mlm_model.config)
             self.base_model = self.mlm_model.roberta
         elif isinstance(config, BertConfig):
             self.model_type = 'bert'
-            self.tokenizer = BertTokenizer.from_pretrained(vocab_name)
-            self.mlm_model = BertForMaskedLM.from_pretrained(model_name)
+            self.tokenizer = BertTokenizer.from_pretrained(vocab_name, cache_dir=os.path.join(CACHE_DIR, "bert"))
+            self.mlm_model = BertForMaskedLM.from_pretrained(model_name, cache_dir=os.path.join(CACHE_DIR, "bert"))
             if random_init == 'all':
                 logger.info('Random initialize model...')
                 self.mlm_model = BertForMaskedLM(self.mlm_model.config)
@@ -239,22 +241,25 @@ class Prober():
         if len(sentences) > 2:
             logger.info(sentences)
             raise ValueError("BERT accepts maximum two sentences in input for each data point")
-
-        first_tokenized_sentence = [self.tokenizer.tokenize(token) if ((not token.startswith('[unused')) and (token != self.MASK)) else [token] for token in sentences[0].split()]
-        first_tokenized_sentence = [item for sublist in first_tokenized_sentence for item in sublist]
         if self.model_type == 'roberta':
             first_tokenized_sentence = self.tokenizer.tokenize(sentences[0])
+        else:
+            first_tokenized_sentence = [self.tokenizer.tokenize(token) if ((not token.startswith('[unused')) and (token != self.MASK)) else [token] for token in sentences[0].split()]
+            first_tokenized_sentence = [item for sublist in first_tokenized_sentence for item in sublist]
+        
         first_segment_id = np.zeros(len(first_tokenized_sentence), dtype=int).tolist()
 
         # add [SEP] token at the end
         first_tokenized_sentence.append(self.SEP)
         first_segment_id.append(0)
 
-        if len(sentences)>1 :
-            second_tokenized_sentece = [self.tokenizer.tokenize(token) if not token.startswith('[unused') else [token] for token in sentences[1].split()]
-            second_tokenized_sentece = [item for sublist in second_tokenized_sentece for item in sublist]
+        if len(sentences) > 1:
             if self.model_type == 'roberta':
                 second_tokenized_sentece = self.tokenizer.tokenize(sentences[1])
+            else:
+                second_tokenized_sentece = [self.tokenizer.tokenize(token) if not token.startswith('[unused') else [token] for token in sentences[1].split()]
+                second_tokenized_sentece = [item for sublist in second_tokenized_sentece for item in sublist]
+            
             second_segment_id = np.full(len(second_tokenized_sentece),1, dtype=int).tolist()
 
             # add [SEP] token at the end
@@ -268,8 +273,8 @@ class Prober():
             segments_ids = first_segment_id
 
         # add [CLS] token at the beginning
-        tokenized_text.insert(0,self.CLS)
-        segments_ids.insert(0,0)
+        tokenized_text.insert(0, self.CLS)
+        segments_ids.insert(0, 0)
 
         # look for masked indices
         masked_indices = []
@@ -338,26 +343,27 @@ class Prober():
             self.try_cuda()
 
         tokens_tensor, segments_tensor, attention_mask_tensor, masked_indices_list, tokenized_text_list, mlm_labels_tensor, mlm_label_ids = self._get_input_tensors_batch_train(sentences_list, samples_list)
-
+        print(segments_tensor)
         if training:
             self.mlm_model.train()
-            loss = self.mlm_model(
+            outputs = self.mlm_model(
                 input_ids=tokens_tensor.to(self._model_device),
                 token_type_ids=segments_tensor.to(self._model_device),
                 attention_mask=attention_mask_tensor.to(self._model_device),
-                masked_lm_labels=mlm_labels_tensor.to(self._model_device),
+                labels=mlm_labels_tensor.to(self._model_device),
             )
-            loss = loss[0]
+            loss = outputs[0]
         else:
             self.mlm_model.eval()
             with torch.no_grad():
-                loss, logits = self.mlm_model(
+                outputs = self.mlm_model(
                     input_ids=tokens_tensor.to(self._model_device),
                     token_type_ids=segments_tensor.to(self._model_device),
                     attention_mask=attention_mask_tensor.to(self._model_device),
-                    masked_lm_labels=mlm_labels_tensor.to(self._model_device),
+                    labels=mlm_labels_tensor.to(self._model_device),
                 )
-            log_probs = F.log_softmax(logits, dim=-1).cpu()
+            loss = outputs[0]
+            log_probs = F.log_softmax(outputs[1], dim=-1).cpu()
 
         if training:
             return loss
@@ -388,7 +394,7 @@ class Prober():
                     topk.append(topk_preds)
 
                     # compute entropy on common vocab
-                    common_logits = logits[i][masked_index].cpu().index_select(dim=0, index=filter_indices)
+                    common_logits = outputs[1][i][masked_index].cpu().index_select(dim=0, index=filter_indices)
                     common_log_prob = -F.log_softmax(common_logits, dim=-1)
                     common_label_id = vocab_to_common_vocab[mlm_label]
                     common_vocab_loss.append(common_log_prob[common_label_id].item())
